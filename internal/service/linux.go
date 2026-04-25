@@ -538,8 +538,8 @@ func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, 
 	return log.String(), nil
 }
 
-// InstallStackWithProgress installs with callback using ONE password.
-// All commands are bundled into a single script.
+// InstallStackWithProgress installs with real-time progress.
+// First caches credentials with sudo -v, then runs each step separately.
 func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
 	var packages []string
 	var services []string
@@ -559,100 +559,70 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	}
 
 	var log strings.Builder
-	total := 4
+	total := 5
 
-	// Build single script - DON'T exit on errors
-	var script strings.Builder
-	script.WriteString("#!/bin/bash\n")
-	script.WriteString("# Don't exit on errors - continue even if something fails\n")
-
-	script.WriteString("echo '[1/4] Updating package list'\n")
-	script.WriteString("sudo apt-get update 2>&1\n")
-
-	script.WriteString("echo '[2/4] Installing packages'\n")
-	script.WriteString(fmt.Sprintf("sudo apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
-
-	script.WriteString("echo '[3/4] Enabling services'\n")
-	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("sudo systemctl enable %s 2>&1 || echo 'enable failed: %s'\n", svc, svc))
-	}
-
-	script.WriteString("echo '[4/4] Starting services'\n")
-	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("sudo systemctl start %s 2>&1 || echo 'start failed: %s'\n", svc, svc))
-	}
-
-	script.WriteString("echo '[DONE]'\n")
-	script.WriteString("echo 'Checking status...'\n")
-	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("sudo systemctl is-active %s 2>&1 || echo '%s is not active'\n", svc, svc))
-	}
-
-	// Write script
-	scriptPath := "/tmp/xampp-install.sh"
-	if err := os.WriteFile(scriptPath, []byte(script.String()), 0755); err != nil {
-		return "", fmt.Errorf("error creating script: %w", err)
-	}
-	defer os.Remove(scriptPath)
-
-	var err error
-	var output string
-
-	onProgress(1, total, "Installing...")
-	log.WriteString("[1/4] Starting installation...\n")
-
-	// Run with pkexec for the WHOLE script - just ONE password
-	output, err = runCmdWithOutput("pkexec", "bash", scriptPath)
-
-	// ALWAYS show some progress, even on error
-	onProgress(2, total, "Running...")
-	log.WriteString(fmt.Sprintf("[2/4] Running... output: %s\n", output))
-
+	// Step 0: Cache credentials with sudo -v (asks for password ONCE)
+	onProgress(1, total, "Authenticating...")
+	log.WriteString("[1/5] Authenticating (sudo -v)...\n")
+	
+	_, err := runCmdWithOutput("sudo", "-v")
 	if err != nil {
-		// Fallback to sudo
-		output2, err2 := runCmdWithOutput("sudo", "bash", scriptPath)
-		onProgress(2, total, "Retrying with sudo...")
-		
-		if err2 != nil {
-			onProgress(2, total, fmt.Sprintf("ERROR: %v", err2))
-			log.WriteString(fmt.Sprintf("Install error: %v\nOutput:\n%v\n", err2, output2))
-			return log.String(), fmt.Errorf("install failed: %v", err2)
-		}
-		output = output2
-	}
-
-	// Parse output
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		switch {
-		case strings.Contains(line, "[1/4]"):
-			onProgress(1, total, "Updating...")
-			log.WriteString("[1/4] Updating...\n")
-		case strings.Contains(line, "[2/4]"):
-			onProgress(2, total, "Installing...")
-			log.WriteString("[2/4] Installing...\n")
-		case strings.Contains(line, "[3/4]"):
-			onProgress(3, total, "Enabling...")
-			log.WriteString("[3/4] Enabling...\n")
-		case strings.Contains(line, "[4/4]"):
-			onProgress(4, total, "Starting...")
-			log.WriteString("[4/4] Starting...\n")
-		case strings.Contains(line, "[DONE]"):
-			onProgress(4, total, "Complete!")
-			log.WriteString("[4/4] Complete!\n")
-		case strings.Contains(line, "FAILED:"):
-			log.WriteString(fmt.Sprintf("⚠ %s\n", line))
+		// Try pkexec for auth
+		_, err = runCmdWithOutput("pkexec", "sudo", "-v")
+		if err != nil {
+			onProgress(1, total, "ERROR: Failed to authenticate")
+			return log.String(), fmt.Errorf("authentication failed: %v", err)
 		}
 	}
+	onProgress(1, total, "✓ Authenticated")
+	log.WriteString("[1/5] ✓ Authenticated\n")
 
-	onProgress(4, total, "✓ Complete")
-	log.WriteString("=== Installation Complete ===\n")
-	log.WriteString(fmt.Sprintf("Stack: %s\n", stackType))
-	log.WriteString(fmt.Sprintf("Services: %s\n", strings.Join(services, ", ")))
+	// Step 1: apt update
+	onProgress(2, total, "Updating package list...")
+	log.WriteString("[2/5] Updating package list...\n")
+	_, err = runCmdWithOutput("sudo", "apt-get", "update", "-qq")
+	if err != nil {
+		onProgress(2, total, "⚠ Update had issues, continuing...")
+		log.WriteString(fmt.Sprintf("  ⚠ %v\n", err))
+	}
+	onProgress(2, total, "✓ Updated")
+	log.WriteString("[2/5] ✓ Updated\n")
+
+	// Step 2: Install packages
+	onProgress(3, total, fmt.Sprintf("Installing %d packages...", len(packages)))
+	log.WriteString(fmt.Sprintf("[3/5] Installing packages: %s\n", strings.Join(packages, ", ")))
+	args := []string{"apt-get", "install", "-y"}
+	args = append(args, packages...)
+	_, err = runCmdWithOutput("sudo", args...)
+	if err != nil {
+		onProgress(3, total, fmt.Sprintf("⚠ Install error: %v", err))
+		log.WriteString(fmt.Sprintf("  ⚠ %v\n", err))
+	}
+	onProgress(3, total, "✓ Installed")
+	log.WriteString("[3/5] ✓ Installed\n")
+
+	// Step 3: Enable services
+	onProgress(4, total, "Enabling services...")
+	log.WriteString(fmt.Sprintf("[4/5] Enabling services: %s\n", strings.Join(services, ", ")))
+	for _, svc := range services {
+		runCmdWithOutput("sudo", "systemctl", "enable", svc)
+	}
+	onProgress(4, total, "✓ Enabled")
+	log.WriteString("[4/5] ✓ Enabled\n")
+
+	// Step 4: Start services
+	onProgress(5, total, "Starting services...")
+	log.WriteString(fmt.Sprintf("[5/5] Starting services: %s\n", strings.Join(services, ", ")))
+	for _, svc := range services {
+		_, err := runCmdWithOutput("sudo", "systemctl", "start", svc)
+		if err != nil {
+			log.WriteString(fmt.Sprintf("  ⚠ %s: %v\n", svc, err))
+		}
+	}
+	onProgress(5, total, "✓ Started")
+	log.WriteString("[5/5] ✓ Started\n")
+
+	log.WriteString(fmt.Sprintf("=== Complete: %s ===\n", stackType))
 
 	return log.String(), nil
 }
