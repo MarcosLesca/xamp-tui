@@ -35,6 +35,19 @@ func DashboardView(services []models.Service, width int, installing bool, instal
 		}
 	}
 
+	// Si no hay servicios y está instalando, mostrar solo el progreso
+	if len(services) == 0 && installing {
+		summary := lipgloss.NewStyle().
+			Foreground(t.Subtext).
+			Render("Waiting for services...")
+		
+		return fmt.Sprintf(`  Dashboard - Installing
+
+%s
+
+%s`, installBanner, summary)
+	}
+
 	if len(services) == 0 && !installing {
 		return DashboardEmptyView(width)
 	}
