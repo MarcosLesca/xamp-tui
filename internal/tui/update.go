@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/charmbracelet/bubbletea"
 
@@ -295,11 +296,11 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.SetScreen(models.ScreenStackSelect)
 		}
 
-	case models.ScreenConfig:
+case models.ScreenConfig:
 		switch m.SelectedMenuIndex {
 		case 0: // Start Installation
 			m.Installing = true
-			m.InstallLog = "Installing..."
+			m.InstallLog = "Starting installation..."
 			m.SetScreen(models.ScreenDashboard)
 			m.InitServices()
 			// Filter services by stack
@@ -307,14 +308,17 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
 
-			// Start installation in goroutine with progress
+			// Run installation in goroutine
 			go func() {
 				logMsg, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
 					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
 				})
+				
+				// Wait a bit then send complete
+				<-time.After(500 * time.Millisecond)
 				InstallCompleteChan <- InstallComplete{Log: logMsg, Err: err}
 			}()
-			
+
 			// Start polling to check install progress
 			m.StartPolling()
 			return m, nil
@@ -446,10 +450,33 @@ func handleDown(m Model) (tea.Model, tea.Cmd) {
 				m.SelectedMenuIndex++
 			}
 
-		case models.ScreenInstall:
-			if m.SelectedMenuIndex < maxIndex {
-				m.SelectedMenuIndex++
-			}
+case models.ScreenInstall:
+		if m.SelectedMenuIndex == 0 {
+			m.Installing = true
+			m.InstallLog = "Starting installation..."
+			m.SetScreen(models.ScreenDashboard)
+			m.InitServices()
+			m.Services = filterServicesByStack(m.Services, m.Config.StackType)
+			stackType := m.Config.StackType
+			svcMgr := m.ServiceManager
+
+			// Run installation synchronously (blocking but shows progress)
+			go func() {
+				logMsg, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
+					// Send progress
+					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
+				})
+				
+				// Wait a bit then send complete
+				<-time.After(500 * time.Millisecond)
+				InstallCompleteChan <- InstallComplete{Log: logMsg, Err: err}
+			}()
+
+			m.StartPolling()
+			m.ResetSelection()
+		} else {
+			m.SetScreen(models.ScreenStackSelect)
+		}
 
 		case models.ScreenPortEdit:
 			if len(m.PortEditValue) < 5 {
