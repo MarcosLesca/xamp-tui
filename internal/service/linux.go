@@ -561,22 +561,28 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	var log strings.Builder
 	total := 4
 
-	// Build single script with ALL commands (verbose for debugging)
+	// Build single script - ALL commands use single sudo at start
 	var script strings.Builder
 	script.WriteString("#!/bin/bash\n")
 	script.WriteString("set -e\n")
-	script.WriteString("echo '[STEP1] apt update'\n")
-	script.WriteString("apt-get update 2>&1\n")
-	script.WriteString("echo '[STEP2] installing packages'\n")
-	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
-	script.WriteString("echo '[STEP3] enabling services'\n")
+
+	// Do EVERYTHING with sudo in the script - one elevation for the whole script
+	script.WriteString("echo '[1/4] Updating package list'\n")
+	script.WriteString("sudo apt-get update 2>&1 || true\n")
+
+	script.WriteString("echo '[2/4] Installing packages'\n")
+	script.WriteString(fmt.Sprintf("sudo apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
+
+	script.WriteString("echo '[3/4] Enabling services'\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 || true\n", svc))
+		script.WriteString(fmt.Sprintf("sudo systemctl enable %s 2>&1 || true\n", svc))
 	}
-	script.WriteString("echo '[STEP4] starting services'\n")
+
+	script.WriteString("echo '[4/4] Starting services'\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 || echo 'FAILED: %s'\n", svc, svc))
+		script.WriteString(fmt.Sprintf("sudo systemctl start %s 2>&1 || echo 'FAILED: %s'\n", svc, svc))
 	}
+
 	script.WriteString("echo '[DONE]'\n")
 
 	// Write script
@@ -589,17 +595,15 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	var err error
 	var output string
 
-	// Progress: Starting
-	onProgress(1, total, "Starting installation...")
+	onProgress(1, total, "Installing...")
 	log.WriteString("[1/4] Starting installation...\n")
 
-	// Run with pkexec (polkit) - shows password prompt in terminal
+	// Run with pkexec for the WHOLE script - just ONE password
 	output, err = runCmdWithOutput("pkexec", "bash", scriptPath)
-	onProgress(2, total, "Running...")
-	
+
 	if err != nil {
-		// Try with sudo
-		output2, err2 := runCmdWithOutput("sudo", "bash", scriptPath)
+		// Fallback to sudo
+		output2, err2 := runCmdWithOutput("sudo", "-S", "bash", scriptPath)
 		if err2 != nil {
 			onProgress(2, total, fmt.Sprintf("ERROR: %v", err2))
 			log.WriteString(fmt.Sprintf("Install error: %v\n%v\n", err2, output2))
@@ -608,9 +612,7 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 		output = output2
 	}
 
-	// Parse output for progress
-	log.WriteString(fmt.Sprintf("=== Output ===\n%s\n=== End ===\n", output))
-
+	// Parse output for progress markers
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -618,23 +620,23 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 			continue
 		}
 		switch {
-		case strings.Contains(line, "[STEP1]"):
-			onProgress(1, total, "Updating packages...")
-			log.WriteString("[1/4] Updating packages...\n")
-		case strings.Contains(line, "[STEP2]"):
-			onProgress(2, total, "Installing packages...")
-			log.WriteString("[2/4] Installing packages...\n")
-		case strings.Contains(line, "[STEP3]"):
-			onProgress(3, total, "Enabling services...")
-			log.WriteString("[3/4] Enabling services...\n")
-		case strings.Contains(line, "[STEP4]"):
-			onProgress(4, total, "Starting services...")
-			log.WriteString("[4/4] Starting services...\n")
+		case strings.Contains(line, "[1/4]"):
+			onProgress(1, total, "Updating...")
+			log.WriteString("[1/4] Updating...\n")
+		case strings.Contains(line, "[2/4]"):
+			onProgress(2, total, "Installing...")
+			log.WriteString("[2/4] Installing...\n")
+		case strings.Contains(line, "[3/4]"):
+			onProgress(3, total, "Enabling...")
+			log.WriteString("[3/4] Enabling...\n")
+		case strings.Contains(line, "[4/4]"):
+			onProgress(4, total, "Starting...")
+			log.WriteString("[4/4] Starting...\n")
+		case strings.Contains(line, "[DONE]"):
+			onProgress(4, total, "Complete!")
+			log.WriteString("[4/4] Complete!\n")
 		case strings.Contains(line, "FAILED:"):
 			log.WriteString(fmt.Sprintf("⚠ %s\n", line))
-		case strings.HasPrefix(line, "["):
-			// Log any [brackets] lines
-			log.WriteString(fmt.Sprintf("  %s\n", line))
 		}
 	}
 
