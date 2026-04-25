@@ -283,10 +283,9 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 
 			// Start installation in goroutine with progress
 			go func() {
-				_, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
+				logMsg, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
 					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
 				})
-				logMsg, _ := svcMgr.InstallStack(stackType)
 				InstallCompleteChan <- InstallComplete{Log: logMsg, Err: err}
 			}()
 
@@ -307,10 +306,9 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.Services = filterServicesByStack(m.Services, m.Config.StackType)
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
-			
+
 			// Start installation in goroutine with progress
 			go func() {
-				InstallProgressChan <- InstallProgress{Step: 1, Total: 4, Message: "Starting..."}
 				logMsg, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
 					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
 				})
