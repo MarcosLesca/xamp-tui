@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -538,8 +539,9 @@ func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, 
 	return log.String(), nil
 }
 
-// InstallStackWithProgress installs with REAL-TIME progress by writing to a log file.
 func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
+	log.Println("InstallStackWithProgress: starting")
+	
 	var packages []string
 	var services []string
 
@@ -557,89 +559,35 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 		return "", fmt.Errorf("stack desconocido: %v", stackType)
 	}
 
-	var log strings.Builder
-	total := 5
+	log.Println("InstallStackWithProgress: running pkexec")
+	onProgress(1, 1, "Installing (enter password)...")
 
-	// Log file for real-time progress
-	logFile := "/tmp/xampp-install.log"
-	
-	// Build script that writes to log file
+	// Fallback to simple sudo script - simpler approach
 	var script strings.Builder
 	script.WriteString("#!/bin/bash\n")
-	script.WriteString(fmt.Sprintf("LOG=%s\n", logFile))
-	script.WriteString("echo 'STEP1' | tee -a $LOG\n")
-	script.WriteString("apt-get update -qq 2>&1 | tee -a $LOG || true\n")
-	script.WriteString("echo 'STEP2' | tee -a $LOG\n")
-	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1 | tee -a $LOG\n", strings.Join(packages, " ")))
-	script.WriteString("echo 'STEP3' | tee -a $LOG\n")
+	script.WriteString(fmt.Sprintf("apt-get update -qq 2>&1 || true\n"))
+	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 | tee -a $LOG || true\n", svc))
+		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 || true\n", svc))
+		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 || true\n", svc))
 	}
-	script.WriteString("echo 'STEP4' | tee -a $LOG\n")
-	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 | tee -a $LOG || echo 'FAILED_%s' | tee -a $LOG\n", svc, svc))
-	}
-	script.WriteString("echo 'STEP5' | tee -a $LOG\n")
-	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("echo 'STATUS_%s: ' | tee -a $LOG; systemctl is-active %s 2>&1 | tee -a $LOG\n", svc, svc))
-	}
-	script.WriteString("echo 'DONE' | tee -a $LOG\n")
 
-	// Write script
-	scriptPath := "/tmp/xampp-install.sh"
-	if err := os.WriteFile(scriptPath, []byte(script.String()), 0755); err != nil {
-		return "", fmt.Errorf("error creating script: %w", err)
-	}
+	scriptPath := "/tmp/xampp-simple.sh"
+	os.WriteFile(scriptPath, []byte(script.String()), 0755)
 	defer os.Remove(scriptPath)
 
-	// Clean old log
-	os.Remove(logFile)
-
-	// Show initial progress
-	onProgress(1, total, "Starting (enter password)...")
-	log.WriteString("[1/5] Starting installation...\n")
-
-	// Run with pkexec - asks for password ONCE
-	_, err := runCmdWithOutput("pkexec", "bash", scriptPath)
-
-	// Read log file and extract progress
-	if data, err := os.ReadFile(logFile); err == nil {
-		content := string(data)
-		lines := strings.Split(content, "\n")
-		for _, line := range lines {
-			switch {
-			case strings.Contains(line, "STEP1"):
-				onProgress(2, total, "Updating...")
-				log.WriteString("[2/5] Updating...\n")
-			case strings.Contains(line, "STEP2"):
-				onProgress(3, total, "Installing...")
-				log.WriteString("[3/5] Installing...\n")
-			case strings.Contains(line, "STEP3"):
-				onProgress(4, total, "Enabling...")
-				log.WriteString("[4/5] Enabling...\n")
-			case strings.Contains(line, "STEP4"):
-				onProgress(5, total, "Starting...")
-				log.WriteString("[5/5] Starting...\n")
-			case strings.Contains(line, "STATUS_"):
-				log.WriteString(fmt.Sprintf("  %s\n", line))
-			case strings.Contains(line, "FAILED_"):
-				log.WriteString(fmt.Sprintf("  ⚠ %s\n", line))
-			}
-		}
-	}
-
-	os.Remove(logFile)
+	// Run with sudo directly for now (simpler)
+	_, err := runCmdWithOutput("sudo", "bash", scriptPath)
+	
+	log.Println("InstallStackWithProgress: completed with err=", err)
 
 	if err != nil {
-		onProgress(5, total, fmt.Sprintf("ERROR: %v", err))
-		log.WriteString(fmt.Sprintf("Error: %v\n", err))
-		return log.String(), err
+		onProgress(1, 1, fmt.Sprintf("ERROR: %v", err))
+		return fmt.Sprintf("Install error: %v", err), err
 	}
 
-	onProgress(5, total, "Complete!")
-	log.WriteString(fmt.Sprintf("=== Complete: %s ===\n", stackType))
-
-	return log.String(), nil
+	onProgress(1, 1, "Complete!")
+	return fmt.Sprintf("Installed: %s", strings.Join(services, ", ")), nil
 }
 
 // joinCmds une comandos con prefijo.

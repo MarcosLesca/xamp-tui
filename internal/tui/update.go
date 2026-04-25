@@ -39,36 +39,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Custom: PollingTick para auto-refresh
 	case PollingTick:
 		if m.Screen == models.ScreenDashboard {
-			// Check for install progress
-			select {
-			case progress, ok := <-InstallProgressChan:
-				if ok {
-					msgStr := fmt.Sprintf("[%d/%d] %s", progress.Step, progress.Total, progress.Message)
-					if m.InstallLog != "" {
-						m.InstallLog += "\n" + msgStr
-					} else {
-						m.InstallLog = msgStr
-					}
-				}
-			default:
+			// Check for install progress (blocking to ensure we get it)
+			if len(InstallProgressChan) > 0 {
+				progress := <-InstallProgressChan
+				log.Println("Got progress:", progress)
+				msgStr := fmt.Sprintf("[%d/%d] %s", progress.Step, progress.Total, progress.Message)
+				m.InstallLog = msgStr
 			}
 			
-			select {
-			case complete, ok := <-InstallCompleteChan:
-				if ok {
-					m.Installing = false
-					if complete.Err != nil {
-						m.ErrMsg = fmt.Sprintf("Install error: %v", complete.Err)
-						m.InstallLog = complete.Log
-					} else {
-						m.InstallLog = complete.Log
-					}
-					log.Println("Install complete, refreshing services...")
-					m.RefreshServices()
-					m.InitServices()
-					m.Services = filterServicesByStack(m.Services, m.Config.StackType)
+			// Check for install complete (blocking)
+			if len(InstallCompleteChan) > 0 {
+				log.Println("Got install complete!")
+				complete := <-InstallCompleteChan
+				m.Installing = false
+				if complete.Err != nil {
+					m.ErrMsg = fmt.Sprintf("Install error: %v", complete.Err)
+					m.InstallLog = complete.Log
+				} else {
+					m.InstallLog = complete.Log
 				}
-			default:
+				log.Println("Install complete, refreshing services...")
+				m.RefreshServices()
+				m.InitServices()
+				m.Services = filterServicesByStack(m.Services, m.Config.StackType)
 			}
 			
 			// Also refresh services
