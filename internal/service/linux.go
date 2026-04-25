@@ -561,29 +561,32 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	var log strings.Builder
 	total := 4
 
-	// Build single script - ALL commands use single sudo at start
+	// Build single script - DON'T exit on errors
 	var script strings.Builder
 	script.WriteString("#!/bin/bash\n")
-	script.WriteString("set -e\n")
+	script.WriteString("# Don't exit on errors - continue even if something fails\n")
 
-	// Do EVERYTHING with sudo in the script - one elevation for the whole script
 	script.WriteString("echo '[1/4] Updating package list'\n")
-	script.WriteString("sudo apt-get update 2>&1 || true\n")
+	script.WriteString("sudo apt-get update 2>&1\n")
 
 	script.WriteString("echo '[2/4] Installing packages'\n")
 	script.WriteString(fmt.Sprintf("sudo apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
 
 	script.WriteString("echo '[3/4] Enabling services'\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("sudo systemctl enable %s 2>&1 || true\n", svc))
+		script.WriteString(fmt.Sprintf("sudo systemctl enable %s 2>&1 || echo 'enable failed: %s'\n", svc, svc))
 	}
 
 	script.WriteString("echo '[4/4] Starting services'\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("sudo systemctl start %s 2>&1 || echo 'FAILED: %s'\n", svc, svc))
+		script.WriteString(fmt.Sprintf("sudo systemctl start %s 2>&1 || echo 'start failed: %s'\n", svc, svc))
 	}
 
 	script.WriteString("echo '[DONE]'\n")
+	script.WriteString("echo 'Checking status...'\n")
+	for _, svc := range services {
+		script.WriteString(fmt.Sprintf("sudo systemctl is-active %s 2>&1 || echo '%s is not active'\n", svc, svc))
+	}
 
 	// Write script
 	scriptPath := "/tmp/xampp-install.sh"
@@ -601,18 +604,24 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	// Run with pkexec for the WHOLE script - just ONE password
 	output, err = runCmdWithOutput("pkexec", "bash", scriptPath)
 
+	// ALWAYS show some progress, even on error
+	onProgress(2, total, "Running...")
+	log.WriteString(fmt.Sprintf("[2/4] Running... output: %s\n", output))
+
 	if err != nil {
 		// Fallback to sudo
-		output2, err2 := runCmdWithOutput("sudo", "-S", "bash", scriptPath)
+		output2, err2 := runCmdWithOutput("sudo", "bash", scriptPath)
+		onProgress(2, total, "Retrying with sudo...")
+		
 		if err2 != nil {
 			onProgress(2, total, fmt.Sprintf("ERROR: %v", err2))
-			log.WriteString(fmt.Sprintf("Install error: %v\n%v\n", err2, output2))
+			log.WriteString(fmt.Sprintf("Install error: %v\nOutput:\n%v\n", err2, output2))
 			return log.String(), fmt.Errorf("install failed: %v", err2)
 		}
 		output = output2
 	}
 
-	// Parse output for progress markers
+	// Parse output
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
