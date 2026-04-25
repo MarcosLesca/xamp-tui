@@ -276,6 +276,8 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.InstallLog = "Installing..."
 			m.SetScreen(models.ScreenDashboard)
 			m.InitServices()
+			// Filter services by stack
+			m.Services = filterServicesByStack(m.Services, m.Config.StackType)
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
 
@@ -301,6 +303,8 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.InstallLog = "Installing..."
 			m.SetScreen(models.ScreenDashboard)
 			m.InitServices()
+			// Filter services by stack
+			m.Services = filterServicesByStack(m.Services, m.Config.StackType)
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
 			
