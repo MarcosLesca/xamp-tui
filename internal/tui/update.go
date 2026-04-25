@@ -4,11 +4,21 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
 
 	"github.com/charmbracelet/bubbletea"
 
 	"xampp-tui/internal/models"
 )
+
+// InstallProgressChan canal global para progreso de instalación
+var InstallProgressChan = make(chan InstallProgress, 10)
+
+// InstallCompleteChan canal global para instalación completa
+var InstallCompleteChan = make(chan InstallComplete, 1)
+
+// mu protects the channels
+var mu sync.Mutex
 
 // Update es la función principal de actualización del modelo.
 // Maneja los mensajes y devuelve el modelo actualizado.
@@ -28,6 +38,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Custom: PollingTick para auto-refresh
 	case PollingTick:
 		if m.Screen == models.ScreenDashboard {
+			// Check for install progress
+			select {
+			case progress, ok := <-InstallProgressChan:
+				if ok {
+					msgStr := fmt.Sprintf("[%d/%d] %s", progress.Step, progress.Total, progress.Message)
+					if m.InstallLog != "" {
+						m.InstallLog += "\n" + msgStr
+					} else {
+						m.InstallLog = msgStr
+					}
+				}
+			default:
+			}
+			
+			select {
+			case complete, ok := <-InstallCompleteChan:
+				if ok {
+					m.Installing = false
+					if complete.Err != nil {
+						m.ErrMsg = fmt.Sprintf("Install error: %v", complete.Err)
+						m.InstallLog = complete.Log
+					} else {
+						m.InstallLog = complete.Log
+					}
+					m.RefreshServices()
+				}
+			default:
+			}
+			
+			// Also refresh services
 			if err := m.RefreshServices(); err != nil {
 				log.Printf("Error refreshing services: %v", err)
 			}
@@ -55,6 +95,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.InstallLog = msg.Log
 		}
 		m.RefreshServices()
+		return m, nil
+
+	// Custom: InstallProgress para mostrar progreso en tiempo real
+	case InstallProgress:
+		msgStr := fmt.Sprintf("[%d/%d] %s", msg.Step, msg.Total, msg.Message)
+		if m.InstallLog != "" {
+			m.InstallLog += "\n" + msgStr
+		} else {
+			m.InstallLog = msgStr
+		}
 		return m, nil
 
 	// Custom: CheckInstallStatus para verificar si terminó la instalación
@@ -226,17 +276,23 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.InstallLog = "Installing..."
 			m.SetScreen(models.ScreenDashboard)
 			m.InitServices()
-			m.StartPolling()
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
-			return m, func() tea.Msg {
-				logMsg, err := svcMgr.InstallStack(stackType)
-				return InstallComplete{Log: logMsg, Err: err}
-			}
+
+			// Start installation in goroutine with progress
+			go func() {
+				_, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
+					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
+				})
+				logMsg, _ := svcMgr.InstallStack(stackType)
+				InstallCompleteChan <- InstallComplete{Log: logMsg, Err: err}
+			}()
+
+			m.StartPolling()
+			m.ResetSelection()
 		} else {
 			m.SetScreen(models.ScreenStackSelect)
 		}
-		m.ResetSelection()
 
 	case models.ScreenConfig:
 		switch m.SelectedMenuIndex {
@@ -245,13 +301,21 @@ func handleEnter(m Model) (tea.Model, tea.Cmd) {
 			m.InstallLog = "Installing..."
 			m.SetScreen(models.ScreenDashboard)
 			m.InitServices()
-			m.StartPolling()
 			stackType := m.Config.StackType
 			svcMgr := m.ServiceManager
-			return m, func() tea.Msg {
-				logMsg, err := svcMgr.InstallStack(stackType)
-				return InstallComplete{Log: logMsg, Err: err}
-			}
+			
+			// Start installation in goroutine with progress
+			go func() {
+				InstallProgressChan <- InstallProgress{Step: 1, Total: 4, Message: "Starting..."}
+				logMsg, err := svcMgr.InstallStackWithProgress(stackType, func(step, total int, message string) {
+					InstallProgressChan <- InstallProgress{Step: step, Total: total, Message: message}
+				})
+				InstallCompleteChan <- InstallComplete{Log: logMsg, Err: err}
+			}()
+			
+			// Start polling to check install progress
+			m.StartPolling()
+			return m, nil
 		case 1: // Edit Options
 			m.ConfigEditing = true
 			m.SelectedMenuIndex = 0

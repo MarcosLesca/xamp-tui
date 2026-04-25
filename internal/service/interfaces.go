@@ -30,6 +30,10 @@ type ServiceManager interface {
 	// Retorna los comandos ejecutados y cualquier error.
 	InstallStack(stackType models.StackType) (string, error)
 
+	// InstallStackWithProgress instala con callback de progreso.
+	// onProgress(step, total, message) se llama en cada paso.
+	InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error)
+
 	// HasRootAccess verifica si tiene permisos de root.
 	HasRootAccess() bool
 

@@ -445,11 +445,13 @@ func (m *LinuxServiceManager) HasRootAccess() bool {
 	return hasSudo() || hasPkexec() || hasDoas()
 }
 
-// InstallStack instala el stack seleccionado (LAMP o LEPP).
-// Crea un script temporal y lo ejecuta con una sola password.
+// InstallStack instala el stack seleccionado paso a paso para mostrar progreso.
+// Retorna un log acumulativo de cada paso.
 func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, error) {
 	var packages []string
 	var services []string
+	var enableCmds []string
+	var startCmds []string
 
 	switch stackType {
 	case models.StackTypeLAMP:
@@ -465,52 +467,173 @@ func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, 
 		return "", fmt.Errorf("stack desconocido: %v", stackType)
 	}
 
-	// Crear script temporal con todos los comandos
-	scriptPath := "/tmp/xampp-tui-install.sh"
-	scriptContent := fmt.Sprintf(`#!/bin/bash
-set -e
-
-echo "=== XAMPP-TUI Installation ==="
-echo "Installing packages..."
-
-# Update
-sudo apt-get update -qq
-
-# Install packages - una sola password
-sudo apt-get install -y %s
-
-# Enable services
-%s
-
-# Start services
-%s
-
-echo "=== Installation Complete ==="
-`, strings.Join(packages, " "),
-		joinCmds("systemctl enable", services),
-		joinCmds("systemctl start", services))
-
-	// Escribir script
-	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
-		return "", fmt.Errorf("error creando script: %w", err)
+	// Build commands arrays
+	for _, svc := range services {
+		enableCmds = append(enableCmds, fmt.Sprintf("systemctl enable %s", svc))
+		startCmds = append(startCmds, fmt.Sprintf("systemctl start %s", svc))
 	}
 
-	// Ejecutar con una sola password usando pkexec (polkit)
-	output, err := runCmdWithOutput("pkexec", "bash", scriptPath)
+	var log strings.Builder
+	log.WriteString("=== XAMPP-TUI Installation ===\n\n")
+
+	// Step 1: apt update
+	log.WriteString("[1/4] Updating package list...\n")
+	var err error
+	_, err = runCmdWithOutput("pkexec", "apt-get", "update", "-qq")
 	if err != nil {
-		// Si pkexec no funciona, intentar con sudo
-		output2, err2 := runCmdWithOutput("sudo", "bash", scriptPath)
+		out, err2 := runCmdWithOutput("sudo", "apt-get", "update", "-qq")
 		if err2 != nil {
-			// Limpiar y devolver error
-			os.Remove(scriptPath)
-			return "", fmt.Errorf("error: %v\n%s", err2, output2)
+			return log.String(), fmt.Errorf("apt update failed: %v", err2)
 		}
-		os.Remove(scriptPath)
-		return output2 + "\n✓ Installation complete!", nil
+		log.WriteString(out)
+		log.WriteString("✓ Done\n\n")
 	}
 
-	os.Remove(scriptPath)
-	return output + "\n✓ Installation complete!", nil
+	// Step 2: Install packages
+	log.WriteString(fmt.Sprintf("[2/4] Installing packages: %s\n", strings.Join(packages, ", ")))
+	args := []string{"apt-get", "install", "-y"}
+	args = append(args, packages...)
+	_, err = runCmdWithOutput("pkexec", args...)
+	if err != nil {
+		out, err2 := runCmdWithOutput("sudo", args...)
+		if err2 != nil {
+			return log.String(), fmt.Errorf("apt install failed: %v", err2)
+		}
+		log.WriteString(out)
+		log.WriteString("✓ Done\n\n")
+	}
+
+	// Step 3: Enable services
+	log.WriteString(fmt.Sprintf("[3/4] Enabling services: %s\n", strings.Join(services, ", ")))
+	for _, cmd := range enableCmds {
+		log.WriteString(fmt.Sprintf("  > %s\n", cmd))
+		_, err = runCmdWithOutput("pkexec", "bash", "-c", cmd)
+		if err != nil {
+			_, err2 := runCmdWithOutput("sudo", "bash", "-c", cmd)
+			if err2 != nil {
+				log.WriteString(fmt.Sprintf("  ⚠ %v (continuing)\n", err2))
+			}
+		}
+	}
+	log.WriteString("✓ Done\n\n")
+
+	// Step 4: Start services
+	log.WriteString(fmt.Sprintf("[4/4] Starting services: %s\n", strings.Join(services, ", ")))
+	for _, cmd := range startCmds {
+		log.WriteString(fmt.Sprintf("  > %s\n", cmd))
+		_, err = runCmdWithOutput("pkexec", "bash", "-c", cmd)
+		if err != nil {
+			_, err2 := runCmdWithOutput("sudo", "bash", "-c", cmd)
+			if err2 != nil {
+				log.WriteString(fmt.Sprintf("  ⚠ %v (continuing)\n", err2))
+			}
+		}
+	}
+	log.WriteString("✓ Done\n\n")
+
+	log.WriteString("=== Installation Complete ===\n")
+	log.WriteString(fmt.Sprintf("Stack: %s\n", stackType))
+	log.WriteString("Services: " + strings.Join(services, ", ") + "\n")
+
+	return log.String(), nil
+}
+
+// InstallStackWithProgress instala con callback de progreso en tiempo real.
+func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
+	var packages []string
+	var services []string
+	var enableCmds []string
+	var startCmds []string
+
+	switch stackType {
+	case models.StackTypeLAMP:
+		packages = []string{"apache2", "mysql-server", "php", "libapache2-mod-php", "php-mysql"}
+		services = []string{"apache2", "mysql"}
+	case models.StackTypeLAMM:
+		packages = []string{"apache2", "mariadb-server", "php", "libapache2-mod-php", "php-mysql", "phpmyadmin"}
+		services = []string{"apache2", "mariadb"}
+	case models.StackTypeLEPP:
+		packages = []string{"nginx", "postgresql", "php-fpm", "php-pgsql"}
+		services = []string{"nginx", "postgresql"}
+	default:
+		return "", fmt.Errorf("stack desconocido: %v", stackType)
+	}
+
+	// Build commands arrays
+	for _, svc := range services {
+		enableCmds = append(enableCmds, fmt.Sprintf("systemctl enable %s", svc))
+		startCmds = append(startCmds, fmt.Sprintf("systemctl start %s", svc))
+	}
+
+	total := 4
+	var log strings.Builder
+
+	// Step 1: apt update
+	onProgress(1, total, "Updating package list...")
+	log.WriteString("[1/4] Updating package list...\n")
+	_, err := runCmdWithOutput("pkexec", "apt-get", "update", "-qq")
+	if err != nil {
+		out, err2 := runCmdWithOutput("sudo", "apt-get", "update", "-qq")
+		if err2 != nil {
+			onProgress(1, total, fmt.Sprintf("ERROR: %v", err2))
+			return log.String(), fmt.Errorf("apt update failed: %v", err2)
+		}
+		log.WriteString(out)
+	}
+	onProgress(1, total, "✓ Done")
+
+	// Step 2: Install packages
+	msg := fmt.Sprintf("Installing: %s", strings.Join(packages, ", "))
+	onProgress(2, total, msg)
+	log.WriteString(fmt.Sprintf("[2/4] %s\n", msg))
+	args := []string{"apt-get", "install", "-y"}
+	args = append(args, packages...)
+	_, err = runCmdWithOutput("pkexec", args...)
+	if err != nil {
+		out, err2 := runCmdWithOutput("sudo", args...)
+		if err2 != nil {
+			onProgress(2, total, fmt.Sprintf("ERROR: %v", err2))
+			return log.String(), fmt.Errorf("apt install failed: %v", err2)
+		}
+		log.WriteString(out)
+	}
+	onProgress(2, total, "✓ Done")
+
+	// Step 3: Enable services
+	msg = fmt.Sprintf("Enabling: %s", strings.Join(services, ", "))
+	onProgress(3, total, msg)
+	log.WriteString(fmt.Sprintf("[3/4] %s\n", msg))
+	for _, cmd := range enableCmds {
+		log.WriteString(fmt.Sprintf("  > %s\n", cmd))
+		_, err = runCmdWithOutput("pkexec", "bash", "-c", cmd)
+		if err != nil {
+			_, err2 := runCmdWithOutput("sudo", "bash", "-c", cmd)
+			if err2 != nil {
+				log.WriteString(fmt.Sprintf("  ⚠ %v (continuing)\n", err2))
+			}
+		}
+	}
+	onProgress(3, total, "✓ Done")
+
+	// Step 4: Start services
+	msg = fmt.Sprintf("Starting: %s", strings.Join(services, ", "))
+	onProgress(4, total, msg)
+	log.WriteString(fmt.Sprintf("[4/4] %s\n", msg))
+	for _, cmd := range startCmds {
+		log.WriteString(fmt.Sprintf("  > %s\n", cmd))
+		_, err = runCmdWithOutput("pkexec", "bash", "-c", cmd)
+		if err != nil {
+			_, err2 := runCmdWithOutput("sudo", "bash", "-c", cmd)
+			if err2 != nil {
+				log.WriteString(fmt.Sprintf("  ⚠ %v (continuing)\n", err2))
+			}
+		}
+	}
+	onProgress(4, total, "✓ Done")
+
+	log.WriteString(fmt.Sprintf("=== Complete: %s ===\n", stackType))
+
+	return log.String(), nil
 }
 
 // joinCmds une comandos con prefijo.

@@ -117,6 +117,17 @@ func (m *MockServiceManager) InstallStack(stackType models.StackType) (string, e
 	return "Mock installation complete", nil
 }
 
+func (m *MockServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
+	if m.shouldError {
+		return "", errors.New("mock error")
+	}
+	onProgress(1, 4, "Starting...")
+	onProgress(2, 4, "Installing packages...")
+	onProgress(3, 4, "Enabling services...")
+	onProgress(4, 4, "Starting services...")
+	return "Mock installation complete", nil
+}
+
 func (m *MockServiceManager) HasRootAccess() bool {
 	return true
 }

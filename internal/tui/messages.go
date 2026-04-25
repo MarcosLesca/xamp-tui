@@ -28,5 +28,12 @@ type InstallComplete struct {
 	Err error
 }
 
+// InstallProgress es un mensaje de progreso durante la instalación.
+type InstallProgress struct {
+	Step    int    // 1-4
+	Total  int    // total de pasos
+	Message string // mensaje del paso actual
+}
+
 // CheckInstallStatus es un mensaje para verificar el estado de instalación.
 type CheckInstallStatus struct{}
