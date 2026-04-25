@@ -538,8 +538,7 @@ func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, 
 	return log.String(), nil
 }
 
-// InstallStackWithProgress installs with real-time progress.
-// First caches credentials with sudo -v, then runs each step separately.
+// InstallStackWithProgress installs with real-time progress using pkexec for ONE password.
 func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
 	var packages []string
 	var services []string
@@ -561,67 +560,88 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	var log strings.Builder
 	total := 5
 
-	// Step 0: Cache credentials with sudo -v (asks for password ONCE)
-	onProgress(1, total, "Authenticating...")
-	log.WriteString("[1/5] Authenticating (sudo -v)...\n")
-	
-	_, err := runCmdWithOutput("sudo", "-v")
-	if err != nil {
-		// Try pkexec for auth
-		_, err = runCmdWithOutput("pkexec", "sudo", "-v")
-		if err != nil {
-			onProgress(1, total, "ERROR: Failed to authenticate")
-			return log.String(), fmt.Errorf("authentication failed: %v", err)
+	// Build script with all commands
+	var script strings.Builder
+	script.WriteString("#!/bin/bash\n")
+	script.WriteString("set -e\n")
+	script.WriteString("echo 'READY'\n")
+
+	// Step 1: Update
+	script.WriteString("echo 'STEP1'\n")
+	script.WriteString("apt-get update -qq 2>&1 || true\n")
+
+	// Step 2: Install
+	script.WriteString("echo 'STEP2'\n")
+	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
+
+	// Step 3: Enable
+	script.WriteString("echo 'STEP3'\n")
+	for _, svc := range services {
+		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 || true\n", svc))
+	}
+
+	// Step 4: Start
+	script.WriteString("echo 'STEP4'\n")
+	for _, svc := range services {
+		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 || echo 'FAILED_%s'\n", svc, svc))
+	}
+
+	// Step 5: Check status
+	script.WriteString("echo 'STEP5'\n")
+	for _, svc := range services {
+		script.WriteString(fmt.Sprintf("systemctl is-active %s 2>&1 || true\n", svc))
+	}
+
+	script.WriteString("echo 'DONE'\n")
+
+	// Write script
+	scriptPath := "/tmp/xampp-install.sh"
+	if err := os.WriteFile(scriptPath, []byte(script.String()), 0755); err != nil {
+		return "", fmt.Errorf("error creating script: %w", err)
+	}
+	defer os.Remove(scriptPath)
+
+	// Step 1: Ask for password ONCE with pkexec
+	onProgress(1, total, "Asking for password...")
+	log.WriteString("[1/5] Requesting authentication...\n")
+
+	// Run with pkexec - shows ONE password dialog via polkit
+	output, err := runCmdWithOutput("pkexec", "bash", scriptPath)
+
+	// Parse output and show progress
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch {
+		case strings.Contains(line, "STEP1"):
+			onProgress(2, total, "Updating packages...")
+			log.WriteString("[2/5] Updating package list...\n")
+		case strings.Contains(line, "STEP2"):
+			onProgress(3, total, "Installing packages...")
+			log.WriteString(fmt.Sprintf("[3/5] Installing: %s\n", strings.Join(packages, ", ")))
+		case strings.Contains(line, "STEP3"):
+			onProgress(4, total, "Enabling services...")
+			log.WriteString("[4/5] Enabling services...\n")
+		case strings.Contains(line, "STEP4"):
+			onProgress(5, total, "Starting services...")
+			log.WriteString("[5/5] Starting services...\n")
+		case strings.HasPrefix(line, "FAILED_"):
+			log.WriteString(fmt.Sprintf("  ⚠ %s\n", line))
+		case strings.Contains(line, "active"):
+			log.WriteString(fmt.Sprintf("  ✓ %s\n", line))
 		}
 	}
-	onProgress(1, total, "✓ Authenticated")
-	log.WriteString("[1/5] ✓ Authenticated\n")
 
-	// Step 1: apt update
-	onProgress(2, total, "Updating package list...")
-	log.WriteString("[2/5] Updating package list...\n")
-	_, err = runCmdWithOutput("sudo", "apt-get", "update", "-qq")
 	if err != nil {
-		onProgress(2, total, "⚠ Update had issues, continuing...")
-		log.WriteString(fmt.Sprintf("  ⚠ %v\n", err))
+		onProgress(5, total, fmt.Sprintf("ERROR: %v", err))
+		log.WriteString(fmt.Sprintf("Error: %v\nOutput: %s\n", err, output))
+		return log.String(), err
 	}
-	onProgress(2, total, "✓ Updated")
-	log.WriteString("[2/5] ✓ Updated\n")
 
-	// Step 2: Install packages
-	onProgress(3, total, fmt.Sprintf("Installing %d packages...", len(packages)))
-	log.WriteString(fmt.Sprintf("[3/5] Installing packages: %s\n", strings.Join(packages, ", ")))
-	args := []string{"apt-get", "install", "-y"}
-	args = append(args, packages...)
-	_, err = runCmdWithOutput("sudo", args...)
-	if err != nil {
-		onProgress(3, total, fmt.Sprintf("⚠ Install error: %v", err))
-		log.WriteString(fmt.Sprintf("  ⚠ %v\n", err))
-	}
-	onProgress(3, total, "✓ Installed")
-	log.WriteString("[3/5] ✓ Installed\n")
-
-	// Step 3: Enable services
-	onProgress(4, total, "Enabling services...")
-	log.WriteString(fmt.Sprintf("[4/5] Enabling services: %s\n", strings.Join(services, ", ")))
-	for _, svc := range services {
-		runCmdWithOutput("sudo", "systemctl", "enable", svc)
-	}
-	onProgress(4, total, "✓ Enabled")
-	log.WriteString("[4/5] ✓ Enabled\n")
-
-	// Step 4: Start services
-	onProgress(5, total, "Starting services...")
-	log.WriteString(fmt.Sprintf("[5/5] Starting services: %s\n", strings.Join(services, ", ")))
-	for _, svc := range services {
-		_, err := runCmdWithOutput("sudo", "systemctl", "start", svc)
-		if err != nil {
-			log.WriteString(fmt.Sprintf("  ⚠ %s: %v\n", svc, err))
-		}
-	}
-	onProgress(5, total, "✓ Started")
-	log.WriteString("[5/5] ✓ Started\n")
-
+	onProgress(5, total, "✓ Complete")
 	log.WriteString(fmt.Sprintf("=== Complete: %s ===\n", stackType))
 
 	return log.String(), nil
