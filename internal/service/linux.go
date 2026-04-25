@@ -538,7 +538,7 @@ func (m *LinuxServiceManager) InstallStack(stackType models.StackType) (string, 
 	return log.String(), nil
 }
 
-// InstallStackWithProgress installs with real-time progress using pkexec for ONE password.
+// InstallStackWithProgress installs with REAL-TIME progress by writing to a log file.
 func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackType, onProgress func(step, total int, message string)) (string, error) {
 	var packages []string
 	var services []string
@@ -560,39 +560,30 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	var log strings.Builder
 	total := 5
 
-	// Build script with all commands
+	// Log file for real-time progress
+	logFile := "/tmp/xampp-install.log"
+	
+	// Build script that writes to log file
 	var script strings.Builder
 	script.WriteString("#!/bin/bash\n")
-	script.WriteString("set -e\n")
-	script.WriteString("echo 'READY'\n")
-
-	// Step 1: Update
-	script.WriteString("echo 'STEP1'\n")
-	script.WriteString("apt-get update -qq 2>&1 || true\n")
-
-	// Step 2: Install
-	script.WriteString("echo 'STEP2'\n")
-	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1\n", strings.Join(packages, " ")))
-
-	// Step 3: Enable
-	script.WriteString("echo 'STEP3'\n")
+	script.WriteString(fmt.Sprintf("LOG=%s\n", logFile))
+	script.WriteString("echo 'STEP1' | tee -a $LOG\n")
+	script.WriteString("apt-get update -qq 2>&1 | tee -a $LOG || true\n")
+	script.WriteString("echo 'STEP2' | tee -a $LOG\n")
+	script.WriteString(fmt.Sprintf("apt-get install -y %s 2>&1 | tee -a $LOG\n", strings.Join(packages, " ")))
+	script.WriteString("echo 'STEP3' | tee -a $LOG\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 || true\n", svc))
+		script.WriteString(fmt.Sprintf("systemctl enable %s 2>&1 | tee -a $LOG || true\n", svc))
 	}
-
-	// Step 4: Start
-	script.WriteString("echo 'STEP4'\n")
+	script.WriteString("echo 'STEP4' | tee -a $LOG\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 || echo 'FAILED_%s'\n", svc, svc))
+		script.WriteString(fmt.Sprintf("systemctl start %s 2>&1 | tee -a $LOG || echo 'FAILED_%s' | tee -a $LOG\n", svc, svc))
 	}
-
-	// Step 5: Check status
-	script.WriteString("echo 'STEP5'\n")
+	script.WriteString("echo 'STEP5' | tee -a $LOG\n")
 	for _, svc := range services {
-		script.WriteString(fmt.Sprintf("systemctl is-active %s 2>&1 || true\n", svc))
+		script.WriteString(fmt.Sprintf("echo 'STATUS_%s: ' | tee -a $LOG; systemctl is-active %s 2>&1 | tee -a $LOG\n", svc, svc))
 	}
-
-	script.WriteString("echo 'DONE'\n")
+	script.WriteString("echo 'DONE' | tee -a $LOG\n")
 
 	// Write script
 	scriptPath := "/tmp/xampp-install.sh"
@@ -601,47 +592,51 @@ func (m *LinuxServiceManager) InstallStackWithProgress(stackType models.StackTyp
 	}
 	defer os.Remove(scriptPath)
 
-	// Step 1: Ask for password ONCE with pkexec
-	onProgress(1, total, "Asking for password...")
-	log.WriteString("[1/5] Requesting authentication...\n")
+	// Clean old log
+	os.Remove(logFile)
 
-	// Run with pkexec - shows ONE password dialog via polkit
-	output, err := runCmdWithOutput("pkexec", "bash", scriptPath)
+	// Show initial progress
+	onProgress(1, total, "Starting (enter password)...")
+	log.WriteString("[1/5] Starting installation...\n")
 
-	// Parse output and show progress
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		switch {
-		case strings.Contains(line, "STEP1"):
-			onProgress(2, total, "Updating packages...")
-			log.WriteString("[2/5] Updating package list...\n")
-		case strings.Contains(line, "STEP2"):
-			onProgress(3, total, "Installing packages...")
-			log.WriteString(fmt.Sprintf("[3/5] Installing: %s\n", strings.Join(packages, ", ")))
-		case strings.Contains(line, "STEP3"):
-			onProgress(4, total, "Enabling services...")
-			log.WriteString("[4/5] Enabling services...\n")
-		case strings.Contains(line, "STEP4"):
-			onProgress(5, total, "Starting services...")
-			log.WriteString("[5/5] Starting services...\n")
-		case strings.HasPrefix(line, "FAILED_"):
-			log.WriteString(fmt.Sprintf("  ⚠ %s\n", line))
-		case strings.Contains(line, "active"):
-			log.WriteString(fmt.Sprintf("  ✓ %s\n", line))
+	// Run with pkexec - asks for password ONCE
+	_, err := runCmdWithOutput("pkexec", "bash", scriptPath)
+
+	// Read log file and extract progress
+	if data, err := os.ReadFile(logFile); err == nil {
+		content := string(data)
+		lines := strings.Split(content, "\n")
+		for _, line := range lines {
+			switch {
+			case strings.Contains(line, "STEP1"):
+				onProgress(2, total, "Updating...")
+				log.WriteString("[2/5] Updating...\n")
+			case strings.Contains(line, "STEP2"):
+				onProgress(3, total, "Installing...")
+				log.WriteString("[3/5] Installing...\n")
+			case strings.Contains(line, "STEP3"):
+				onProgress(4, total, "Enabling...")
+				log.WriteString("[4/5] Enabling...\n")
+			case strings.Contains(line, "STEP4"):
+				onProgress(5, total, "Starting...")
+				log.WriteString("[5/5] Starting...\n")
+			case strings.Contains(line, "STATUS_"):
+				log.WriteString(fmt.Sprintf("  %s\n", line))
+			case strings.Contains(line, "FAILED_"):
+				log.WriteString(fmt.Sprintf("  ⚠ %s\n", line))
+			}
 		}
 	}
+
+	os.Remove(logFile)
 
 	if err != nil {
 		onProgress(5, total, fmt.Sprintf("ERROR: %v", err))
-		log.WriteString(fmt.Sprintf("Error: %v\nOutput: %s\n", err, output))
+		log.WriteString(fmt.Sprintf("Error: %v\n", err))
 		return log.String(), err
 	}
 
-	onProgress(5, total, "✓ Complete")
+	onProgress(5, total, "Complete!")
 	log.WriteString(fmt.Sprintf("=== Complete: %s ===\n", stackType))
 
 	return log.String(), nil
