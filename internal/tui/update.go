@@ -63,7 +63,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.InstallLog = complete.Log
 					}
+					log.Println("Install complete, refreshing services...")
 					m.RefreshServices()
+					m.InitServices()
+					m.Services = filterServicesByStack(m.Services, m.Config.StackType)
 				}
 			default:
 			}

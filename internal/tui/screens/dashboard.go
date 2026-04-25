@@ -75,14 +75,18 @@ func DashboardView(services []models.Service, width int, installing bool, instal
 }
 
 // renderInstallBanner renderiza el banner de instalación en progreso.
+// renderInstallBanner muestra el banner de instalación.
 func renderInstallBanner(t *Theme) string {
-	style := lipgloss.NewStyle().
-		Background(t.Yellow).
-		Foreground(t.Base).
-		Padding(0, 1).
-		Bold(true)
+	var installBanner string
 
-	return style.Render(" ● INSTALLING... ") + " Esperá que pida tu password\n\n"
+	installBanner += lipgloss.NewStyle().
+		Bold(true).
+		Foreground(t.Yellow).
+		Background(t.Overlay).
+		Padding(0, 1).
+		Render(" ● INSTALLING... ") + " Please enter your password\n\n"
+
+	return installBanner
 }
 
 // renderInstallLog renderiza el log de instalación al final.
